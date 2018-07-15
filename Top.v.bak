@@ -1,0 +1,249 @@
+module Top( EncA, EncB, RST, CS, SCK, MISO, MOSI, valve, XtalIn, XtalOut, P80, P7, P8);
+input [3:0] EncA, EncB;
+input RST, CS, SCK, MOSI, XtalIn;
+output reg MISO;
+output valve, XtalOut, P80, P7, P8;
+
+
+//エンコーダーカウント部分
+
+wire signed [15:0] num[3:0];
+
+EncoderCounter( EncA[0], EncB[0], RST, num[0]);
+EncoderCounter( EncA[1], EncB[1], RST, num[1]);
+EncoderCounter( EncA[2], EncB[2], RST, num[2]);
+EncoderCounter( EncA[3], EncB[3], RST, num[3]);
+
+//目標設定部分
+TargetRelease(num[0], target[1], valve);
+
+//発振回路
+assign XtalOut=~XtalIn;
+
+//SPI部分
+reg [5:0] cnt;
+reg signed [15:0] data;
+reg [7:0] req;//要求
+reg signed [15:0] target[1:0];//目標値
+reg [5:0] Port[1:0];
+reg [9:0] Pwm[1:0];
+
+
+/*function [15:0] GetData(cnt, MOSI);
+//input cnt, MOSI;
+reg [15:0] data;
+
+begin
+	if(cnt==8) begin
+		dataq<=(MOSI<<15);
+		GetData=data;
+		end
+	else begin
+		data=(MOSI<<(15-(cnt-8)))+data;
+		if(cnt==23) begin
+			GetData=data;
+			end
+		end
+	end
+endfunction*/
+
+
+always @(posedge SCK) begin
+if(CS) begin
+	MISO<=1'bz;
+	cnt<=0;
+	req<=0;
+	end
+else begin
+	cnt<=cnt+1;
+	if(cnt<=7) begin
+		req<=(MOSI<<(7-cnt))+req;
+		end
+	//受信系プログラム群//0x03を要求された際に以下を実行する。
+	else if(cnt>7) begin
+		case(req)
+			3:
+				if(cnt==8) begin
+					target[0]<=(MOSI<<15);//初期化
+					end
+				else begin
+					target[0]=(MOSI<<(15-(cnt-8)))+target[0];
+					if(cnt==23) begin
+						target[1]=target[0];
+						end
+					end
+			4:
+				if(cnt<=13) begin
+					if(cnt==8) begin
+						Port[0]<=(MOSI<<5);//初期化
+						end
+					else begin
+						Port[0]=(MOSI<<(5-(cnt-8)))+Port[0];
+						end
+					end
+				else begin
+					if(cnt==14) begin
+						Pwm[0]<=(MOSI<<9);//初期化
+						end
+					else begin
+						Pwm[0]=(MOSI<<(9-(cnt-14)))+Pwm[0];
+						if(cnt==23) begin
+							Port[1]=Port[0];
+							Pwm[1]=Pwm[0];
+							end
+						end
+					end					
+					
+			endcase
+		end
+	end
+end
+
+
+always @(negedge SCK) begin
+if(CS) begin
+	MISO<=1'bz;
+	end
+else begin//送信系プログラム群
+	if(cnt>7&&req==1) begin//0x01を要求された際に以下を実行する。
+		if(cnt==8) begin
+			data=num[0];
+			MISO=(data>>15)&1;
+			end
+		else begin
+			MISO<=(data>>(15-(cnt-8)))&1;
+			end
+		end
+	else if(cnt>7&&req==5) begin//0x05を要求された際に以下を実行する。
+		MISO<=(target[1]>>(15-(cnt-8)))&1;
+		end
+	else begin
+		MISO<=1'bz;
+		end
+	end
+end
+
+reg [9:0] Duty[2:0];
+
+
+always @* begin
+case(Port[1])
+	0:
+		Duty[0]=Pwm[1];
+	1:
+		Duty[1]=Pwm[1];
+	2:
+		Duty[2]=Pwm[1];
+	endcase
+end
+PwmGenerator(XtalOut, Duty[0], P80);
+PwmGenerator(XtalOut, Duty[1], P7);
+PwmGenerator(XtalOut, Duty[2], P8);
+
+
+endmodule
+
+
+module EncoderCounter(A, B, RST, num);
+input A,  B, RST;
+output wire signed [15:0] num;
+
+reg signed [15:0] cnt[3:0];
+
+assign num=cnt[0]+cnt[1]+cnt[2]+cnt[3];
+
+always @(posedge A or negedge RST) begin
+if(!RST)
+	cnt[0]<=16'd0;
+else
+	if(!B)
+		cnt[0]<=cnt[0]+16'd1;
+	else
+		cnt[0]<=cnt[0]-16'd1;
+end
+
+always @(negedge A or negedge RST) begin
+if(!RST)
+	cnt[1]<=16'd0;
+else
+	if(B)
+		cnt[1]<=cnt[1]+16'd1;
+	else
+		cnt[1]<=cnt[1]-16'd1;
+end
+
+always @(posedge B or negedge RST) begin
+if(!RST)
+	cnt[2]<=16'd0;
+else
+	if(A)
+		cnt[2]<=cnt[2]+16'd1;
+	else
+		cnt[2]<=cnt[2]-16'd1;
+end
+
+always @(negedge B or negedge RST) begin
+if(!RST)
+	cnt[3]<=16'd0;
+else
+	if(!A)
+		cnt[3]<=cnt[3]+16'd1;
+	else
+		cnt[3]<=cnt[3]-16'd1;
+end
+
+endmodule
+
+
+module TargetRelease(num, target, valve);
+input [15:0] num, target;
+output reg valve;
+
+always @* begin
+if(num>=target) begin
+	valve<=1'b1;
+	end
+else begin
+	valve<=1'b0;
+	end
+end
+
+endmodule
+
+
+module PwmGenerator(XtalOut, duty, pin);
+input XtalOut;
+input [9:0] duty;
+output reg pin;
+
+reg [9:0] cnt;
+
+always @(posedge XtalOut) begin
+cnt<=cnt+1;
+if(cnt<=duty) begin
+	pin<=1'b1;
+	end
+else if(duty<=10'd1000) begin
+	pin<=1'b0;
+	end
+else begin
+	cnt<=10'b0;
+	end
+end
+
+endmodule
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
